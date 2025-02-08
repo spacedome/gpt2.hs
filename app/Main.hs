@@ -79,3 +79,7 @@ main = do
   case results of
     Just ten -> BL.putStr (encodePretty (metadata ten))
     Nothing -> putStrLn "error"
+  putStrLn ""
+  case results of
+    Just ten -> print $ byteStringToFloats $ BL.take 24 $ BL.drop 24 (binaryData ten)
+    Nothing -> putStrLn "error2"
