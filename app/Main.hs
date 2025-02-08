@@ -72,10 +72,10 @@ byteStringToFloats bs = runGet getFloats bs
           return (x : xs)
 
 
-data Tensor = T1 (NLA.Vector Float) | T2 (NLA.Matrix Float)
+data Tensor = T1 (NLA.Vector Float) | T2 (NLA.Matrix Float) deriving (Show)
 
-bytesToTensor :: TensorMetadata -> BL.ByteString -> Tensor
-bytesToTensor meta bs = case shape meta of
+bytesToTensor :: BL.ByteString -> TensorMetadata -> Tensor
+bytesToTensor bs meta = case shape meta of
   [] -> undefined
   [n] -> T1 (n NLA.|> dataChunk)
   [n, m] -> T2 ((n NLA.>< m) dataChunk)
@@ -89,11 +89,11 @@ bytesToTensor meta bs = case shape meta of
 -- Example usage
 main :: IO ()
 main = do
-  results <- readSafeTensors "test.tensor"
+  results <- readSafeTensors "model.safetensors"
   case results of
     Just ten -> BL.putStr (encodePretty (metadata ten))
     Nothing -> putStrLn "error"
   putStrLn ""
   case results of
-    Just ten -> print $ byteStringToFloats $ BL.take 24 $ BL.drop 24 (binaryData ten)
+    Just ten -> print (fmap (bytesToTensor (binaryData ten)) (metadata ten))
     Nothing -> putStrLn "error2"
