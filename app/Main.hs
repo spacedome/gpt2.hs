@@ -11,6 +11,8 @@ import Data.Binary.Get (Get, getWord64le, getFloatle, runGet, runGetOrFail, isEm
 import Data.Word (Word64)
 import GHC.Generics
 import Data.Aeson.Encode.Pretty (encodePretty)
+import qualified Numeric.LinearAlgebra as NLA
+import Data.Bifunctor (bimap)
 
 -- Define a data structure to hold tensor metadata
 data TensorMetadata = TensorMetadata
@@ -56,10 +58,8 @@ parseWord64 bs
   | BL.length bs >= 8 = Just $ runGet getWord64le bs
   | otherwise        = Nothing
 
-byteStringToFloats :: BL.ByteString -> Either String [Float]
-byteStringToFloats bs = case runGetOrFail getFloats bs of
-    Left (_, _, err) -> Left err
-    Right (_, _, xs) -> Right xs
+byteStringToFloats :: BL.ByteString -> [Float]
+byteStringToFloats bs = runGet getFloats bs
   where
     getFloats :: Get [Float]
     getFloats = do
@@ -70,6 +70,20 @@ byteStringToFloats bs = case runGetOrFail getFloats bs of
           x <- getFloatle
           xs <- getFloats
           return (x : xs)
+
+
+data Tensor = T1 (NLA.Vector Float) | T2 (NLA.Matrix Float)
+
+bytesToTensor :: TensorMetadata -> BL.ByteString -> Tensor
+bytesToTensor meta bs = case shape meta of
+  [] -> undefined
+  [n] -> T1 (n NLA.|> dataChunk)
+  [n, m] -> T2 ((n NLA.>< m) dataChunk)
+  [1, 1, n, m] -> T2 ((n NLA.>< m) dataChunk)
+  _ -> undefined
+  where (startpos, endpos) = bimap fromIntegral fromIntegral (dataOffsets meta)
+        dataChunk = byteStringToFloats (BL.drop startpos (BL.take endpos bs))
+        
 
 
 -- Example usage
