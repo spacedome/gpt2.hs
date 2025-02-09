@@ -77,17 +77,19 @@ byteStringToFloats bs = runGet getFloats bs
         xs <- getFloats
         return (x : xs)
 
-data Tensor = T1 (NLA.Vector Float) | T2 (NLA.Matrix Float) deriving (Show)
+bytesToTensor :: BL.ByteString -> TensorMetadata -> Tensor
+bytesToTensor bs meta = case shape meta of
+  [] -> undefined
+  [n] -> T1 (n NLA.|> dataChunk)
+  [n, m] -> T2 ((n NLA.>< m) dataChunk)
+  [1, 1, n, m] -> T2 ((n NLA.>< m) dataChunk)
+  _ -> undefined
+ where
+  (startpos, endpos) = bimap fromIntegral fromIntegral (dataOffsets meta)
+  dataChunk = byteStringToFloats (BL.drop startpos (BL.take endpos bs))
 
-type TensorMap = KM.KeyMap Tensor
-
-newtype TokenEmbeddingLayer = TokenEmbeddingLayer [NLA.Vector Float]
-
-newtype PositionEmbeddingLayer = PositionEmbeddingLayer [NLA.Vector Float]
-
-data BlockLayer = BlockLayer LayerNorm
-
-data LayerNorm = LayerNorm (NLA.Vector Float) (NLA.Vector Float)
+getTensorMap :: SafeTensors -> TensorMap
+getTensorMap ten = fmap (bytesToTensor (binaryData ten)) (metadata ten)
 
 getTELayer :: TensorMap -> TokenEmbeddingLayer
 getTELayer tm = TokenEmbeddingLayer x
@@ -113,28 +115,35 @@ getLayerNorm tm = LayerNorm w b
     Just (T1 v) -> v
     _ -> undefined
 
-bytesToTensor :: BL.ByteString -> TensorMetadata -> Tensor
-bytesToTensor bs meta = case shape meta of
-  [] -> undefined
-  [n] -> T1 (n NLA.|> dataChunk)
-  [n, m] -> T2 ((n NLA.>< m) dataChunk)
-  [1, 1, n, m] -> T2 ((n NLA.>< m) dataChunk)
-  _ -> undefined
+getAttention :: TensorMap -> Attention
+getAttention tm = Attention w b
  where
-  (startpos, endpos) = bimap fromIntegral fromIntegral (dataOffsets meta)
-  dataChunk = byteStringToFloats (BL.drop startpos (BL.take endpos bs))
+  w = case KM.lookup (K.fromString "h.0.attn.c_attn.weight") tm of
+    Just (T2 v) -> v
+    _ -> undefined
+  b = case KM.lookup (K.fromString "h.0.attn.c_attn.bias") tm of
+    Just (T1 v) -> v
+    _ -> undefined
 
-getTensorMap :: SafeTensors -> TensorMap
-getTensorMap ten = fmap (bytesToTensor (binaryData ten)) (metadata ten)
 
-data GPTModel = GPTModel {wpe :: PositionEmbeddingLayer, wte :: TokenEmbeddingLayer, ln1 :: LayerNorm}
+data Tensor = T1 (NLA.Vector Float) | T2 (NLA.Matrix Float) deriving (Show)
+
+type TensorMap = KM.KeyMap Tensor
+
+newtype TokenEmbeddingLayer = TokenEmbeddingLayer [NLA.Vector Float]
+newtype PositionEmbeddingLayer = PositionEmbeddingLayer [NLA.Vector Float]
+data BlockLayer = BlockLayer LayerNorm
+data LayerNorm = LayerNorm (NLA.Vector Float) (NLA.Vector Float)
+data Attention = Attention (NLA.Matrix Float) (NLA.Vector Float)
+data GPTModel = GPTModel {wpe :: PositionEmbeddingLayer, wte :: TokenEmbeddingLayer, ln1 :: LayerNorm, attn :: Attention}
 
 constructModel :: TensorMap -> GPTModel
-constructModel tm = GPTModel{wpe = pe, wte = te, ln1 = le}
+constructModel tm = GPTModel{wpe = pe, wte = te, ln1 = le, attn = at}
  where
   pe = getPELayer tm
   te = getTELayer tm
   le = getLayerNorm tm
+  at = getAttention tm
 
 forwardLN :: LayerNorm -> NLA.Vector Float -> NLA.Vector Float
 forwardLN (LayerNorm w b) x = y
@@ -152,8 +161,7 @@ forward model token = l
   TokenEmbeddingLayer wtew = wte model
   PositionEmbeddingLayer wpew = wpe model
   emb = (wtew !! token) + head wpew
-  z = traceShow emb emb
-  l = forwardLN (ln1 model) z
+  l = forwardLN (ln1 model) emb
 
 run :: Maybe SafeTensors -> Maybe String
 run safeten = do
