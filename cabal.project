@@ -1,0 +1,4 @@
+packages: .
+
+package gpt2
+  flags: +openblas
