@@ -159,13 +159,43 @@ forwardLN (LayerNorm w b) x = y
     fact = NLA.scalar (sqrt (varx + 1e-5))
     y = ((x - mean) / fact) * w + b
 
+
+forwardAttn :: Attention -> NLA.Vector Float -> NLA.Vector Float
+forwardAttn (Attention w b) x = qout
+  where y = ((NLA.tr w) NLA.#> x) + b -- [3N]
+        qkv = MD.takesV [768, 768, 768] y
+        (q, k, v) = (head qkv, (head . tail) qkv, (head . tail . tail) qkv)
+        qh = MD.takesV (replicate 12 64) q
+        qh1 = head qh
+        qh1T = MD.fromColumns [qh1]
+        kh = MD.takesV (replicate 12 64) k
+        kh1 = head kh
+        kh1T = MD.fromColumns [kh1]
+        vh = MD.takesV (replicate 12 64) v
+        vh1 = head vh
+        vh1T = MD.fromColumns [vh1]
+        at1 = (NLA.tr qh1T) NLA.<>  kh1T -- / sqrt T
+        atm = MD.fromRows (fmap softmax (MD.toRows at1))
+        -- mask
+        -- softmax
+        z = (traceShow atm) atm NLA.<> (NLA.tr vh1T)
+        qout = (traceShow z) q
+
+
+softmax :: NLA.Vector Float -> NLA.Vector Float
+softmax v = expv * esum
+  where expv = NLA.cmap exp v
+        esum = NLA.scalar (1 / NLA.sumElements expv)
+
+
 forward :: GPTModel -> Int -> NLA.Vector Float
-forward model token = l
+forward model token = q
   where
     TokenEmbeddingLayer wtew = wte model
     PositionEmbeddingLayer wpew = wpe model
     emb = (wtew !! token) + head wpew
     l = forwardLN (ln1 model) emb
+    q = forwardAttn (attn model) l
 
 run :: Maybe SafeTensors -> Maybe String
 run safeten = do
