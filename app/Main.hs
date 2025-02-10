@@ -138,19 +138,33 @@ getAttention tm = Attention aw ab pw pb
       Just (T1 v) -> v
       _ -> undefined
 
-data Tensor = T1 (NLA.Vector Float) | T2 (NLA.Matrix Float) deriving (Show)
+getMLP :: TensorMap -> MLPLayer
+getMLP tm = MLP aw ab pw pb
+  where
+    aw = case KM.lookup (K.fromString "h.0.mlp.c_fc.weight") tm of
+      Just (T2 v) -> NLA.tr v
+      _ -> undefined
+    ab = case KM.lookup (K.fromString "h.0.mlp.c_fc.bias") tm of
+      Just (T1 v) -> v
+      _ -> undefined
+    pw = case KM.lookup (K.fromString "h.0.mlp.c_proj.weight") tm of
+      Just (T2 v) -> NLA.tr v
+      _ -> undefined
+    pb = case KM.lookup (K.fromString "h.0.mlp.c_proj.bias") tm of
+      Just (T1 v) -> v
+      _ -> undefined
+
+data Tensor = T1 V | T2 M deriving (Show)
 
 type TensorMap = KM.KeyMap Tensor
 
-newtype TokenEmbeddingLayer = TokenEmbeddingLayer [NLA.Vector Float]
+newtype TokenEmbeddingLayer = TokenEmbeddingLayer [V]
 
-newtype PositionEmbeddingLayer = PositionEmbeddingLayer [NLA.Vector Float]
+newtype PositionEmbeddingLayer = PositionEmbeddingLayer [V]
 
-data BlockLayer = BlockLayer {
-  ln1 :: LayerNorm,
-  attn :: Attention,
-  ln2 :: LayerNorm
-}
+data BlockLayer = BlockLayer LayerNorm  Attention LayerNorm
+
+data MLPLayer = MLP M V M V
 
 data LayerNorm = LayerNorm (NLA.Vector Float) (NLA.Vector Float)
 
@@ -214,12 +228,15 @@ forwardAttn at@(Attention _ _ w b) xs = z
     y = fmap MD.vjoin (transpose (fmap MD.toRows lm))
     z = fmap ((+ b) . (w NLA.#>)) y
 
+forwardMLP :: MLPLayer -> [V] -> [V]
+forwardMLP = undefined
+
 forwardBlock :: BlockLayer -> [V] -> [V]
 forwardBlock (BlockLayer l1 at l2) xs = x3
   where
     x1 = fmap (forwardLN l1) xs
     x2 = zipWith (+) xs (forwardAttn at x1)
-    x3 = (traceShow (fmap (MD.takesV [5]) x2)) (fmap (forwardLN l2) x2)
+    x3 = fmap (forwardLN l2) x2
 
 
 softmax :: NLA.Vector Float -> NLA.Vector Float
