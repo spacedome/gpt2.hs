@@ -10,14 +10,15 @@ import Data.Aeson.Types (Parser, parseMaybe)
 import Data.Bifunctor (bimap)
 import Data.Binary.Get (Get, getFloatle, getWord64le, isEmpty, runGet)
 import qualified Data.ByteString.Lazy as BL
+import Data.List (transpose)
 import Data.Word (Word64)
 import Debug.Trace
 import GHC.Generics
 import qualified Numeric.LinearAlgebra as NLA
 import qualified Numeric.LinearAlgebra.Data as MD
-import Data.List (transpose)
 
 type V = NLA.Vector Float
+
 type M = NLA.Matrix Float
 
 -- Define a data structure to hold tensor metadata
@@ -69,7 +70,7 @@ parseWord64 bs
   | otherwise = Nothing
 
 byteStringToFloats :: BL.ByteString -> [Float]
-byteStringToFloats= runGet getFloats
+byteStringToFloats = runGet getFloats
   where
     getFloats :: Get [Float]
     getFloats = do
@@ -109,13 +110,13 @@ getPELayer tm = PositionEmbeddingLayer x
       Just (T2 m) -> MD.toRows m
       _ -> undefined
 
-getLayerNorm :: TensorMap -> LayerNorm
-getLayerNorm tm = LayerNorm w b
+getLayerNorm :: TensorMap -> String -> LayerNorm
+getLayerNorm tm s = LayerNorm w b
   where
-    w = case KM.lookup (K.fromString "h.0.ln_1.weight") tm of
+    w = case KM.lookup (K.fromString (s ++ ".weight")) tm of
       Just (T1 v) -> v
       _ -> undefined
-    b = case KM.lookup (K.fromString "h.0.ln_1.bias") tm of
+    b = case KM.lookup (K.fromString (s ++ ".bias")) tm of
       Just (T1 v) -> v
       _ -> undefined
 
@@ -143,20 +144,27 @@ newtype TokenEmbeddingLayer = TokenEmbeddingLayer [NLA.Vector Float]
 
 newtype PositionEmbeddingLayer = PositionEmbeddingLayer [NLA.Vector Float]
 
--- data BlockLayer = BlockLayer LayerNorm
+-- data BlockLayer = BlockLayer LayerNorm Attention LayerNorm
 
 data LayerNorm = LayerNorm (NLA.Vector Float) (NLA.Vector Float)
 
 data Attention = Attention M V M V
 
-data GPTModel = GPTModel {wpe :: PositionEmbeddingLayer, wte :: TokenEmbeddingLayer, ln1 :: LayerNorm, attn :: Attention}
+data GPTModel = GPTModel
+  { wpe :: PositionEmbeddingLayer,
+    wte :: TokenEmbeddingLayer,
+    ln1 :: LayerNorm,
+    attn :: Attention,
+    ln2 :: LayerNorm
+  }
 
 constructModel :: TensorMap -> GPTModel
-constructModel tm = GPTModel {wpe = pe, wte = te, ln1 = le, attn = at}
+constructModel tm = GPTModel {wpe = pe, wte = te, ln1 = le1, attn = at, ln2 = le2}
   where
     pe = getPELayer tm
     te = getTELayer tm
-    le = getLayerNorm tm
+    le1 = getLayerNorm tm "h.0.ln_1"
+    le2 = getLayerNorm tm "h.0.ln_2"
     at = getAttention tm
 
 forwardLN :: LayerNorm -> NLA.Vector Float -> NLA.Vector Float
@@ -169,48 +177,47 @@ forwardLN (LayerNorm w b) x = y
     fact = NLA.scalar (sqrt (varx + 1e-5))
     y = ((x - mean) / fact) * w + b
 
-
-
 forwardAtToken :: Attention -> V -> ([V], [V], [V])
 forwardAtToken (Attention w b _ _) x = (qh, kh, vh)
-  where y = (w NLA.#> x) + b -- [3N]
-        qkv = MD.takesV [768, 768, 768] y
-        (q, k, v) = (head qkv, (head . tail) qkv, (head . tail . tail) qkv)
-        qh = MD.takesV (replicate 12 64) q
-        kh = MD.takesV (replicate 12 64) k
-        vh = MD.takesV (replicate 12 64) v
+  where
+    y = (w NLA.#> x) + b -- [3N]
+    qkv = MD.takesV [768, 768, 768] y
+    (q, k, v) = (head qkv, (head . tail) qkv, (head . tail . tail) qkv)
+    qh = MD.takesV (replicate 12 64) q
+    kh = MD.takesV (replicate 12 64) k
+    vh = MD.takesV (replicate 12 64) v
 
 forwardHead :: (M, M, M) -> M
 forwardHead (q, k, v) = z
-  where attnMatrix = (NLA.tr q) NLA.<> k * (NLA.scalar (1 / 8)) -- 1 / sqrt (size k)
-        attnMasked = tril (NLA.rows attnMatrix) + attnMatrix
-        attnSoftmax = MD.fromRows (fmap softmax (MD.toRows attnMasked))
-        z = attnSoftmax NLA.<> (NLA.tr v)
-
+  where
+    attnMatrix = (NLA.tr q) NLA.<> k * (NLA.scalar (1 / 8)) -- 1 / sqrt (size k)
+    attnMasked = tril (NLA.rows attnMatrix) + attnMatrix
+    attnSoftmax = MD.fromRows (fmap softmax (MD.toRows attnMasked))
+    z = attnSoftmax NLA.<> (NLA.tr v)
 
 forwardAttn :: Attention -> [V] -> [V]
 forwardAttn at@(Attention _ _ w b) xs = z
-  where (q, k, v) = unzip3 (fmap (forwardAtToken at) xs )
-        qh = fmap MD.fromColumns (transpose q)
-        kh = fmap MD.fromColumns (transpose k)
-        vh = fmap MD.fromColumns (transpose v)
-        lm = fmap forwardHead (zip3 qh kh vh)
-        y = fmap MD.vjoin (transpose (fmap MD.toRows lm))
-        z = fmap ((+b) . (w NLA.#>)) y
+  where
+    (q, k, v) = unzip3 (fmap (forwardAtToken at) xs)
+    qh = fmap MD.fromColumns (transpose q)
+    kh = fmap MD.fromColumns (transpose k)
+    vh = fmap MD.fromColumns (transpose v)
+    lm = fmap forwardHead (zip3 qh kh vh)
+    y = fmap MD.vjoin (transpose (fmap MD.toRows lm))
+    z = fmap ((+ b) . (w NLA.#>)) y
 
 softmax :: NLA.Vector Float -> NLA.Vector Float
 softmax v = expv * esum
-  where expv = NLA.cmap exp v
-        esum = NLA.scalar (1 / NLA.sumElements expv)
-
+  where
+    expv = NLA.cmap exp v
+    esum = NLA.scalar (1 / NLA.sumElements expv)
 
 -- Function to fill the upper triangular part of a matrix with -inf
 tril :: Int -> NLA.Matrix Float
-tril n = NLA.build (n, n) (\i j -> if j > i then -1/0 else 0)
-
+tril n = NLA.build (n, n) (\i j -> if j > i then -1 / 0 else 0)
 
 forward :: GPTModel -> Int -> [V]
-forward model token = q
+forward model token = o
   where
     TokenEmbeddingLayer wtew = wte model
     PositionEmbeddingLayer wpew = wpe model
@@ -219,6 +226,7 @@ forward model token = q
     l1 = forwardLN (ln1 model) emb1
     l2 = forwardLN (ln1 model) emb2
     q = forwardAttn (attn model) [l1, l2]
+    o = fmap (forwardLN (ln2 model)) q
 
 run :: Maybe SafeTensors -> Maybe String
 run safeten = do
