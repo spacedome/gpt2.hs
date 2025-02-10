@@ -15,6 +15,7 @@ import Debug.Trace
 import GHC.Generics
 import qualified Numeric.LinearAlgebra as NLA
 import qualified Numeric.LinearAlgebra.Data as MD
+import Data.List (transpose)
 
 type V = NLA.Vector Float
 type M = NLA.Matrix Float
@@ -163,6 +164,7 @@ forwardLN (LayerNorm w b) x = y
     y = ((x - mean) / fact) * w + b
 
 
+
 forwardAtToken :: Attention -> V -> ([V], [V], [V])
 forwardAtToken (Attention w b) x = (qh, kh, vh)
   where y = ((NLA.tr w) NLA.#> x) + b -- [3N]
@@ -173,24 +175,35 @@ forwardAtToken (Attention w b) x = (qh, kh, vh)
         vh = MD.takesV (replicate 12 64) v
 
 forwardAttn :: Attention -> [NLA.Vector Float] -> NLA.Vector Float
-forwardAttn (Attention w b) xs = qout
-  where y = ((NLA.tr w) NLA.#> x) + b -- [3N]
-        qkv = MD.takesV [768, 768, 768] y
-        (q, k, v) = (head qkv, (head . tail) qkv, (head . tail . tail) qkv)
-        qh = MD.takesV (replicate 12 64) q
-        qh1 = head qh
-        qh1T = MD.fromColumns [qh1]
-        kh = MD.takesV (replicate 12 64) k
-        kh1 = head kh
-        kh1T = MD.fromColumns [kh1]
-        vh = MD.takesV (replicate 12 64) v
-        vh1 = head vh
-        vh1T = MD.fromColumns [vh1]
-        at1 = (NLA.tr qh1T) NLA.<>  kh1T -- / sqrt T
-        at1mask = tril (NLA.rows at1) + at1
-        atm = MD.fromRows (fmap softmax (MD.toRows at1mask))
-        z = (traceShow atm) atm NLA.<> (NLA.tr vh1T)
+forwardAttn at@(Attention w b) xs = (head . head) qout
+  where (q, k, v) = unzip3 (fmap (forwardAtToken at) xs )
+        qh1 =  head $ fmap MD.fromColumns (transpose q)
+        kh1 =  head $ fmap MD.fromColumns (transpose k)
+        vh1 =  head $ fmap MD.fromColumns (transpose v)
+        at1 = (NLA.tr qh1) NLA.<> kh1 * (NLA.scalar (1 / 8)) -- 1 / sqrt (size k)
+        at1mask = (traceShow at1) tril (NLA.rows at1) + at1
+        atm = (traceShow at1mask) MD.fromRows (fmap softmax (MD.toRows at1mask))
+        z = (traceShow atm) atm NLA.<> (NLA.tr vh1)
         qout = (traceShow z) q
+
+
+  -- where y = ((NLA.tr w) NLA.#> x) + b -- [3N]
+  --       qkv = MD.takesV [768, 768, 768] y
+  --       (q, k, v) = (head qkv, (head . tail) qkv, (head . tail . tail) qkv)
+  --       qh = MD.takesV (replicate 12 64) q
+  --       qh1 = head qh
+  --       qh1T = MD.fromColumns [qh1]
+  --       kh = MD.takesV (replicate 12 64) k
+  --       kh1 = head kh
+  --       kh1T = MD.fromColumns [kh1]
+  --       vh = MD.takesV (replicate 12 64) v
+  --       vh1 = head vh
+  --       vh1T = MD.fromColumns [vh1]
+  --       at1 = (NLA.tr qh1T) NLA.<>  kh1T -- / sqrt T
+  --       at1mask = tril (NLA.rows at1) + at1
+  --       atm = MD.fromRows (fmap softmax (MD.toRows at1mask))
+  --       z = (traceShow atm) atm NLA.<> (NLA.tr vh1T)
+  --       qout = (traceShow z) q
 
 
 softmax :: NLA.Vector Float -> NLA.Vector Float
@@ -209,9 +222,11 @@ forward model token = q
   where
     TokenEmbeddingLayer wtew = wte model
     PositionEmbeddingLayer wpew = wpe model
-    emb = (wtew !! token) + head wpew
-    l = forwardLN (ln1 model) emb
-    q = forwardAttn (attn model) [l]
+    emb1 = (wtew !! token) + head wpew
+    emb2 = (wtew !! token) + (head . tail) wpew
+    l1 = forwardLN (ln1 model) emb1
+    l2 = forwardLN (ln1 model) emb2
+    q = forwardAttn (attn model) [l1, l2]
 
 run :: Maybe SafeTensors -> Maybe String
 run safeten = do
