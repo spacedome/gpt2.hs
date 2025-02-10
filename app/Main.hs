@@ -16,6 +16,9 @@ import GHC.Generics
 import qualified Numeric.LinearAlgebra as NLA
 import qualified Numeric.LinearAlgebra.Data as MD
 
+type V = NLA.Vector Float
+type M = NLA.Matrix Float
+
 -- Define a data structure to hold tensor metadata
 data TensorMetadata = TensorMetadata
   { dtype :: String,
@@ -160,8 +163,17 @@ forwardLN (LayerNorm w b) x = y
     y = ((x - mean) / fact) * w + b
 
 
-forwardAttn :: Attention -> NLA.Vector Float -> NLA.Vector Float
-forwardAttn (Attention w b) x = qout
+forwardAtToken :: Attention -> V -> ([V], [V], [V])
+forwardAtToken (Attention w b) x = (qh, kh, vh)
+  where y = ((NLA.tr w) NLA.#> x) + b -- [3N]
+        qkv = MD.takesV [768, 768, 768] y
+        (q, k, v) = (head qkv, (head . tail) qkv, (head . tail . tail) qkv)
+        qh = MD.takesV (replicate 12 64) q
+        kh = MD.takesV (replicate 12 64) k
+        vh = MD.takesV (replicate 12 64) v
+
+forwardAttn :: Attention -> [NLA.Vector Float] -> NLA.Vector Float
+forwardAttn (Attention w b) xs = qout
   where y = ((NLA.tr w) NLA.#> x) + b -- [3N]
         qkv = MD.takesV [768, 768, 768] y
         (q, k, v) = (head qkv, (head . tail) qkv, (head . tail . tail) qkv)
@@ -175,9 +187,8 @@ forwardAttn (Attention w b) x = qout
         vh1 = head vh
         vh1T = MD.fromColumns [vh1]
         at1 = (NLA.tr qh1T) NLA.<>  kh1T -- / sqrt T
-        atm = MD.fromRows (fmap softmax (MD.toRows at1))
-        -- mask
-        -- softmax
+        at1mask = tril (NLA.rows at1) + at1
+        atm = MD.fromRows (fmap softmax (MD.toRows at1mask))
         z = (traceShow atm) atm NLA.<> (NLA.tr vh1T)
         qout = (traceShow z) q
 
@@ -188,6 +199,11 @@ softmax v = expv * esum
         esum = NLA.scalar (1 / NLA.sumElements expv)
 
 
+-- Function to fill the upper triangular part of a matrix with -inf
+tril :: Int -> NLA.Matrix Float
+tril n = NLA.build (n, n) (\i j -> if j > i then -1/0 else 0)
+
+
 forward :: GPTModel -> Int -> NLA.Vector Float
 forward model token = q
   where
@@ -195,7 +211,7 @@ forward model token = q
     PositionEmbeddingLayer wpew = wpe model
     emb = (wtew !! token) + head wpew
     l = forwardLN (ln1 model) emb
-    q = forwardAttn (attn model) l
+    q = forwardAttn (attn model) [l]
 
 run :: Maybe SafeTensors -> Maybe String
 run safeten = do
