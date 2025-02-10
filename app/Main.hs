@@ -3,12 +3,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import Data.Aeson
-import Data.Aeson.Encode.Pretty (encodePretty)
+-- import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseMaybe)
 import Data.Bifunctor (bimap)
-import Data.Binary.Get (Get, getFloatle, getWord64le, isEmpty, runGet, runGetOrFail)
+import Data.Binary.Get (Get, getFloatle, getWord64le, isEmpty, runGet)
 import qualified Data.ByteString.Lazy as BL
 import Data.Word (Word64)
 import Debug.Trace
@@ -120,12 +120,18 @@ getLayerNorm tm = LayerNorm w b
       _ -> undefined
 
 getAttention :: TensorMap -> Attention
-getAttention tm = Attention w b
+getAttention tm = Attention aw ab pw pb
   where
-    w = case KM.lookup (K.fromString "h.0.attn.c_attn.weight") tm of
-      Just (T2 v) -> v
+    aw = case KM.lookup (K.fromString "h.0.attn.c_attn.weight") tm of
+      Just (T2 v) -> NLA.tr v
       _ -> undefined
-    b = case KM.lookup (K.fromString "h.0.attn.c_attn.bias") tm of
+    ab = case KM.lookup (K.fromString "h.0.attn.c_attn.bias") tm of
+      Just (T1 v) -> v
+      _ -> undefined
+    pw = case KM.lookup (K.fromString "h.0.attn.c_proj.weight") tm of
+      Just (T2 v) -> NLA.tr v
+      _ -> undefined
+    pb = case KM.lookup (K.fromString "h.0.attn.c_proj.bias") tm of
       Just (T1 v) -> v
       _ -> undefined
 
@@ -141,7 +147,7 @@ newtype PositionEmbeddingLayer = PositionEmbeddingLayer [NLA.Vector Float]
 
 data LayerNorm = LayerNorm (NLA.Vector Float) (NLA.Vector Float)
 
-data Attention = Attention (NLA.Matrix Float) (NLA.Vector Float)
+data Attention = Attention M V M V
 
 data GPTModel = GPTModel {wpe :: PositionEmbeddingLayer, wte :: TokenEmbeddingLayer, ln1 :: LayerNorm, attn :: Attention}
 
@@ -166,8 +172,8 @@ forwardLN (LayerNorm w b) x = y
 
 
 forwardAtToken :: Attention -> V -> ([V], [V], [V])
-forwardAtToken (Attention w b) x = (qh, kh, vh)
-  where y = ((NLA.tr w) NLA.#> x) + b -- [3N]
+forwardAtToken (Attention w b _ _) x = (qh, kh, vh)
+  where y = (w NLA.#> x) + b -- [3N]
         qkv = MD.takesV [768, 768, 768] y
         (q, k, v) = (head qkv, (head . tail) qkv, (head . tail . tail) qkv)
         qh = MD.takesV (replicate 12 64) q
@@ -183,16 +189,14 @@ forwardHead (q, k, v) = z
 
 
 forwardAttn :: Attention -> [V] -> [V]
-forwardAttn at@(Attention w b) xs = qout
+forwardAttn at@(Attention _ _ w b) xs = z
   where (q, k, v) = unzip3 (fmap (forwardAtToken at) xs )
-        qh1 =  head $ fmap MD.fromColumns (transpose q)
-        kh1 =  head $ fmap MD.fromColumns (transpose k)
-        vh1 =  head $ fmap MD.fromColumns (transpose v)
-        at1 = (NLA.tr qh1) NLA.<> kh1 * (NLA.scalar (1 / 8)) -- 1 / sqrt (size k)
-        at1mask = tril (NLA.rows at1) + at1
-        atm = MD.fromRows (fmap softmax (MD.toRows at1mask))
-        z = MD.toColumns (atm NLA.<> (NLA.tr vh1))
-        qout = (traceShow z) z
+        qh = fmap MD.fromColumns (transpose q)
+        kh = fmap MD.fromColumns (transpose k)
+        vh = fmap MD.fromColumns (transpose v)
+        lm = fmap forwardHead (zip3 qh kh vh)
+        y = fmap MD.vjoin (transpose (fmap MD.toRows lm))
+        z = fmap ((+b) . (w NLA.#>)) y
 
 softmax :: NLA.Vector Float -> NLA.Vector Float
 softmax v = expv * esum
@@ -205,7 +209,7 @@ tril :: Int -> NLA.Matrix Float
 tril n = NLA.build (n, n) (\i j -> if j > i then -1/0 else 0)
 
 
-forward :: GPTModel -> Int -> NLA.Vector Float
+forward :: GPTModel -> Int -> [V]
 forward model token = q
   where
     TokenEmbeddingLayer wtew = wte model
@@ -214,7 +218,7 @@ forward model token = q
     emb2 = (wtew !! token) + (head . tail) wpew
     l1 = forwardLN (ln1 model) emb1
     l2 = forwardLN (ln1 model) emb2
-    q = last $ forwardAttn (attn model) [l1, l2]
+    q = forwardAttn (attn model) [l1, l2]
 
 run :: Maybe SafeTensors -> Maybe String
 run safeten = do
@@ -222,7 +226,7 @@ run safeten = do
   let ten = getTensorMap t
   let model = constructModel ten
   let next = forward model 15496
-  return (show next)
+  return (show (fmap (MD.takesV [5]) next))
 
 main :: IO ()
 main = do
