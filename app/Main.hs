@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import Data.Aeson
--- import Data.Aeson.Encode.Pretty (encodePretty)
+import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseMaybe)
@@ -34,7 +34,9 @@ data SafeTensors = SafeTensors
   { metadata :: KM.KeyMap TensorMetadata,
     binaryData :: BL.ByteString
   }
-  deriving (Show)
+
+instance Show SafeTensors where
+  show safetensors = show $ encodePretty (metadata safetensors)
 
 -- Parse tensor metadata from JSON
 parseTensorMetadata :: Value -> Parser TensorMetadata
@@ -144,7 +146,11 @@ newtype TokenEmbeddingLayer = TokenEmbeddingLayer [NLA.Vector Float]
 
 newtype PositionEmbeddingLayer = PositionEmbeddingLayer [NLA.Vector Float]
 
--- data BlockLayer = BlockLayer LayerNorm Attention LayerNorm
+data BlockLayer = BlockLayer {
+  ln1 :: LayerNorm,
+  attn :: Attention,
+  ln2 :: LayerNorm
+}
 
 data LayerNorm = LayerNorm (NLA.Vector Float) (NLA.Vector Float)
 
@@ -153,16 +159,17 @@ data Attention = Attention M V M V
 data GPTModel = GPTModel
   { wpe :: PositionEmbeddingLayer,
     wte :: TokenEmbeddingLayer,
-    ln1 :: LayerNorm,
-    attn :: Attention,
-    ln2 :: LayerNorm
+    block :: BlockLayer
   }
 
 constructModel :: TensorMap -> GPTModel
-constructModel tm = GPTModel {wpe = pe, wte = te, ln1 = le1, attn = at, ln2 = le2}
+constructModel tm =
+  GPTModel
+    { wpe = getPELayer tm,
+      wte = getTELayer tm,
+      block = BlockLayer le1 at le2
+    }
   where
-    pe = getPELayer tm
-    te = getTELayer tm
     le1 = getLayerNorm tm "h.0.ln_1"
     le2 = getLayerNorm tm "h.0.ln_2"
     at = getAttention tm
@@ -177,6 +184,7 @@ forwardLN (LayerNorm w b) x = y
     fact = NLA.scalar (sqrt (varx + 1e-5))
     y = ((x - mean) / fact) * w + b
 
+
 forwardAtToken :: Attention -> V -> ([V], [V], [V])
 forwardAtToken (Attention w b _ _) x = (qh, kh, vh)
   where
@@ -190,10 +198,10 @@ forwardAtToken (Attention w b _ _) x = (qh, kh, vh)
 forwardHead :: (M, M, M) -> M
 forwardHead (q, k, v) = z
   where
-    attnMatrix = (NLA.tr q) NLA.<> k * (NLA.scalar (1 / 8)) -- 1 / sqrt (size k)
+    attnMatrix = NLA.tr q NLA.<> k * NLA.scalar (1 / 8) -- 1 / sqrt (size k)
     attnMasked = tril (NLA.rows attnMatrix) + attnMatrix
     attnSoftmax = MD.fromRows (fmap softmax (MD.toRows attnMasked))
-    z = attnSoftmax NLA.<> (NLA.tr v)
+    z = attnSoftmax NLA.<> NLA.tr v
 
 forwardAttn :: Attention -> [V] -> [V]
 forwardAttn at@(Attention _ _ w b) xs = z
@@ -205,6 +213,14 @@ forwardAttn at@(Attention _ _ w b) xs = z
     lm = fmap forwardHead (zip3 qh kh vh)
     y = fmap MD.vjoin (transpose (fmap MD.toRows lm))
     z = fmap ((+ b) . (w NLA.#>)) y
+
+forwardBlock :: BlockLayer -> [V] -> [V]
+forwardBlock (BlockLayer l1 at l2) xs = x3
+  where
+    x1 = fmap (forwardLN l1) xs
+    x2 = zipWith (+) xs (forwardAttn at x1)
+    x3 = (traceShow (fmap (MD.takesV [5]) x2)) (fmap (forwardLN l2) x2)
+
 
 softmax :: NLA.Vector Float -> NLA.Vector Float
 softmax v = expv * esum
@@ -223,10 +239,7 @@ forward model token = o
     PositionEmbeddingLayer wpew = wpe model
     emb1 = (wtew !! token) + head wpew
     emb2 = (wtew !! token) + (head . tail) wpew
-    l1 = forwardLN (ln1 model) emb1
-    l2 = forwardLN (ln1 model) emb2
-    q = forwardAttn (attn model) [l1, l2]
-    o = fmap (forwardLN (ln2 model)) q
+    o = forwardBlock (block model) [emb1, emb2]
 
 run :: Maybe SafeTensors -> Maybe String
 run safeten = do
