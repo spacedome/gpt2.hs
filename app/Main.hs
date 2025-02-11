@@ -183,7 +183,8 @@ data Attention = Attention M V M V
 data GPTModel = GPTModel
   { wpe :: PositionEmbeddingLayer,
     wte :: TokenEmbeddingLayer,
-    blocks :: [BlockLayer]
+    blocks :: [BlockLayer],
+    lnf :: LayerNorm
   }
 
 constructModel :: TensorMap -> GPTModel
@@ -191,7 +192,8 @@ constructModel tm =
   GPTModel
     { wpe = getPELayer tm,
       wte = getTELayer tm,
-      blocks = reverse (getBlock tm <$> [0 .. 11])
+      blocks = reverse (getBlock tm <$> [0 .. 11]),
+      lnf = getLayerNorm tm "ln_f"
     }
 
 forwardLN :: LayerNorm -> V -> V
@@ -241,13 +243,12 @@ forwardMLP (MLP wfc bfc wproj bproj) x = x3
     x3 = fmap ((+ bproj) . (wproj #>)) x2
 
 forwardBlock :: BlockLayer -> [V] -> [V]
-forwardBlock (BlockLayer l1 at l2 mp) xs = x5
+forwardBlock (BlockLayer l1 at l2 mp) xs = x4
   where
     x1 = fmap (forwardLN l1) xs
     x2 = zipWith (+) xs (forwardAttn at x1)
     x3 = fmap (forwardLN l2) x2
     x4 = zipWith (+) x2 (forwardMLP mp x3)
-    x5 = (traceShow (fmap (takesV [5]) x4)) x4
 
 softmax :: V -> V
 softmax v = expv * scalar (1 / sumElements expv)
@@ -262,13 +263,15 @@ tril :: Int -> M
 tril n = build (n, n) (\i j -> if j > i then -1 / 0 else 0)
 
 forward :: GPTModel -> Int -> [V]
-forward model token = o
+forward model token = x3
   where
     TokenEmbeddingLayer wtew = wte model
     PositionEmbeddingLayer wpew = wpe model
     emb1 = (wtew !! token) + head wpew
     emb2 = (wtew !! token) + (head . tail) wpew
-    o = (foldr (.) id (forwardBlock <$> blocks model)) [emb1, emb2]
+    x1 = (foldr (.) id (forwardBlock <$> blocks model)) [emb1, emb2]
+    x2 = fmap (forwardLN (lnf model)) x1
+    x3 = fmap (tr (fromColumns wtew) #>) x2
 
 run :: Maybe SafeTensors -> Maybe String
 run safeten = do
