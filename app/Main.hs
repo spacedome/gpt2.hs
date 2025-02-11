@@ -12,10 +12,10 @@ import Data.Binary.Get (Get, getFloatle, getWord64le, isEmpty, runGet)
 import qualified Data.ByteString.Lazy as BL
 import Data.List (transpose)
 import Data.Word (Word64)
--- import Debug.Trace
+import Debug.Trace
 import GHC.Generics
-import Numeric.LinearAlgebra ((<>), (|>), (><), (#>), tr, Vector, Matrix, size, scalar, sumElements, rows, cmap, build)
-import Numeric.LinearAlgebra.Data (toRows, fromRows,  takesV, fromColumns, vjoin)
+import Numeric.LinearAlgebra (Matrix, Vector, build, cmap, rows, scalar, size, sumElements, tr, (#>), (<>), (><), (|>))
+import Numeric.LinearAlgebra.Data (fromColumns, fromRows, takesV, toRows, vjoin)
 import Prelude hiding ((<>))
 
 type V = Vector Float
@@ -163,7 +163,7 @@ newtype TokenEmbeddingLayer = TokenEmbeddingLayer [V]
 
 newtype PositionEmbeddingLayer = PositionEmbeddingLayer [V]
 
-data BlockLayer = BlockLayer LayerNorm  Attention LayerNorm
+data BlockLayer = BlockLayer LayerNorm Attention LayerNorm MLPLayer
 
 data MLPLayer = MLP M V M V
 
@@ -182,12 +182,14 @@ constructModel tm =
   GPTModel
     { wpe = getPELayer tm,
       wte = getTELayer tm,
-      block = BlockLayer le1 at le2
+      block = BlockLayer le1 at le2 mp
     }
   where
     le1 = getLayerNorm tm "h.0.ln_1"
     le2 = getLayerNorm tm "h.0.ln_2"
     at = getAttention tm
+    mp = getMLP tm
+
 
 forwardLN :: LayerNorm -> V -> V
 forwardLN (LayerNorm w b) x = y
@@ -198,7 +200,6 @@ forwardLN (LayerNorm w b) x = y
     varx = sumElements (cent * cent) / n
     fact = scalar (sqrt (varx + 1e-5))
     y = ((x - mean) / fact) * w + b
-
 
 forwardAtToken :: Attention -> V -> ([V], [V], [V])
 forwardAtToken (Attention w b _ _) x = (qh, kh, vh)
@@ -230,22 +231,29 @@ forwardAttn at@(Attention _ _ w b) xs = z
     z = fmap ((+ b) . (w #>)) y
 
 forwardMLP :: MLPLayer -> [V] -> [V]
-forwardMLP = undefined
+forwardMLP (MLP wfc bfc wproj bproj) x = x3
+  where x1 = (traceShow (fmap (takesV [5]) x)) fmap ((+ bfc) . (wfc #>)) x
+        x2 = (traceShow (fmap (takesV [5]) x1)) fmap gelu x1
+        x3 = (traceShow (fmap (takesV [5]) x2)) fmap ((+ bproj) . (wproj #>)) x2
 
 forwardBlock :: BlockLayer -> [V] -> [V]
-forwardBlock (BlockLayer l1 at l2) xs = x3
+forwardBlock (BlockLayer l1 at l2 mp) xs = x4
   where
     x1 = fmap (forwardLN l1) xs
     x2 = zipWith (+) xs (forwardAttn at x1)
     x3 = fmap (forwardLN l2) x2
-
+    x4 = forwardMLP mp x3
 
 softmax :: V -> V
 softmax v = expv * scalar (1 / sumElements expv)
-  where expv = cmap exp v
+  where
+    expv = cmap exp v
+
+gelu :: V -> V
+gelu x = 0.5 * x * (1 + tanh (sqrt (2 / pi) * (x + 0.044715 * x * x * x)))
 
 -- Function to fill the upper triangular part of a matrix with -inf
-tril :: Int -> M 
+tril :: Int -> M
 tril n = build (n, n) (\i j -> if j > i then -1 / 0 else 0)
 
 forward :: GPTModel -> Int -> [V]
