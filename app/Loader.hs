@@ -20,6 +20,7 @@ import Numeric.LinearAlgebra.Data (toRows)
 import Prelude hiding ((<>))
 
 -- simple sum type so we can load either vec or mat
+-- I could probably use the generic Container from hmatrix but this is easy
 data Tensor = T1 V | T2 M
 
 -- generate a keymap based on the safetensor metadata
@@ -56,11 +57,6 @@ parseTensorMetadata = withObject "TensorMetadata" $ \obj -> do
           dtype = mdtype
         }
     )
-
-readSafeTensors :: FilePath -> IO (Maybe SafeTensors)
-readSafeTensors filePath = do
-  contents <- BL.readFile filePath
-  return (parseTensors contents)
 
 parseTensors :: BL.ByteString -> Maybe SafeTensors
 parseTensors bs = do
@@ -104,8 +100,6 @@ bytesToTensor bs meta = case shape meta of
     (startpos, endpos) = bimap fromIntegral fromIntegral (dataOffsets meta)
     dataChunk = byteStringToFloats (BL.drop startpos (BL.take endpos bs))
 
-getTensorMap :: SafeTensors -> TensorMap
-getTensorMap ten = fmap (bytesToTensor (binaryData ten)) (metadata ten)
 
 getMat :: TensorMap -> String -> Maybe M
 getMat tm s = case KM.lookup (K.fromString s) tm of
@@ -157,3 +151,29 @@ getBlock tm i = do
   at <- getAttention tm prefix
   mp <- getMLP tm prefix
   return (Block le1 at le2 mp)
+
+constructModel :: TensorMap -> Maybe GPT
+constructModel tm = do
+  pe <- getPELayer tm
+  te <- getTELayer tm
+  block <- mapM (getBlock tm) [0 .. 11]
+  ln <- getLayerNorm tm "ln_f"
+  return (GPT pe te block ln)
+
+getTensorMap :: SafeTensors -> TensorMap
+getTensorMap ten = fmap (bytesToTensor (binaryData ten)) (metadata ten)
+
+parseModel :: BL.ByteString -> Either String GPT
+parseModel bytes = do
+  safeTensors <- case parseTensors bytes of
+    Just tensors -> Right tensors
+    Nothing -> Left "Could not parse bytestring"
+  let tensorMap = getTensorMap safeTensors
+  case constructModel tensorMap of
+    Just model -> Right model
+    Nothing -> Left "Issue constructing layers"
+
+readModel :: String -> IO (Either String GPT)
+readModel filePath = do
+  contents <- BL.readFile filePath
+  return (parseModel contents)
