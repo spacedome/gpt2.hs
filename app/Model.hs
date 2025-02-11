@@ -35,8 +35,7 @@ data GPT = GPT
 
 softmax :: V -> V
 softmax v = expv * scalar (1 / sumElements expv)
-  where
-    expv = cmap exp v
+  where expv = cmap exp v
 
 -- approximation of gelu using tanh (close enough approx to not matter)
 gelu :: V -> V
