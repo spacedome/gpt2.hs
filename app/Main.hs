@@ -123,37 +123,46 @@ getLayerNorm tm s = LayerNorm w b
       Just (T1 v) -> v
       _ -> undefined
 
-getAttention :: TensorMap -> Attention
-getAttention tm = Attention aw ab pw pb
+getAttention :: TensorMap -> String -> Attention
+getAttention tm layer = Attention aw ab pw pb
   where
-    aw = case KM.lookup (K.fromString "h.0.attn.c_attn.weight") tm of
+    aw = case KM.lookup (K.fromString (layer ++ ".attn.c_attn.weight")) tm of
       Just (T2 v) -> tr v
       _ -> undefined
-    ab = case KM.lookup (K.fromString "h.0.attn.c_attn.bias") tm of
+    ab = case KM.lookup (K.fromString (layer ++ ".attn.c_attn.bias")) tm of
       Just (T1 v) -> v
       _ -> undefined
-    pw = case KM.lookup (K.fromString "h.0.attn.c_proj.weight") tm of
+    pw = case KM.lookup (K.fromString (layer ++ ".attn.c_proj.weight")) tm of
       Just (T2 v) -> tr v
       _ -> undefined
-    pb = case KM.lookup (K.fromString "h.0.attn.c_proj.bias") tm of
+    pb = case KM.lookup (K.fromString (layer ++ ".attn.c_proj.bias")) tm of
       Just (T1 v) -> v
       _ -> undefined
 
-getMLP :: TensorMap -> MLPLayer
-getMLP tm = MLP aw ab pw pb
+getMLP :: TensorMap -> String -> MLPLayer
+getMLP tm layer = MLP aw ab pw pb
   where
-    aw = case KM.lookup (K.fromString "h.0.mlp.c_fc.weight") tm of
+    aw = case KM.lookup (K.fromString (layer ++ ".mlp.c_fc.weight")) tm of
       Just (T2 v) -> tr v
       _ -> undefined
-    ab = case KM.lookup (K.fromString "h.0.mlp.c_fc.bias") tm of
+    ab = case KM.lookup (K.fromString (layer ++ ".mlp.c_fc.bias")) tm of
       Just (T1 v) -> v
       _ -> undefined
-    pw = case KM.lookup (K.fromString "h.0.mlp.c_proj.weight") tm of
+    pw = case KM.lookup (K.fromString (layer ++ ".mlp.c_proj.weight")) tm of
       Just (T2 v) -> tr v
       _ -> undefined
-    pb = case KM.lookup (K.fromString "h.0.mlp.c_proj.bias") tm of
+    pb = case KM.lookup (K.fromString (layer ++ ".mlp.c_proj.bias")) tm of
       Just (T1 v) -> v
       _ -> undefined
+
+getBlock :: TensorMap -> Int -> BlockLayer
+getBlock tm i = BlockLayer le1 at le2 mp
+  where
+    prefix = "h." ++ show i
+    le1 = getLayerNorm tm (prefix ++ ".ln_1")
+    le2 = getLayerNorm tm (prefix ++ ".ln_2")
+    at = getAttention tm prefix
+    mp = getMLP tm prefix
 
 data Tensor = T1 V | T2 M deriving (Show)
 
@@ -174,7 +183,7 @@ data Attention = Attention M V M V
 data GPTModel = GPTModel
   { wpe :: PositionEmbeddingLayer,
     wte :: TokenEmbeddingLayer,
-    block :: BlockLayer
+    blocks :: [BlockLayer]
   }
 
 constructModel :: TensorMap -> GPTModel
@@ -182,14 +191,8 @@ constructModel tm =
   GPTModel
     { wpe = getPELayer tm,
       wte = getTELayer tm,
-      block = BlockLayer le1 at le2 mp
+      blocks = reverse (getBlock tm <$> [0 .. 11])
     }
-  where
-    le1 = getLayerNorm tm "h.0.ln_1"
-    le2 = getLayerNorm tm "h.0.ln_2"
-    at = getAttention tm
-    mp = getMLP tm
-
 
 forwardLN :: LayerNorm -> V -> V
 forwardLN (LayerNorm w b) x = y
@@ -232,17 +235,19 @@ forwardAttn at@(Attention _ _ w b) xs = z
 
 forwardMLP :: MLPLayer -> [V] -> [V]
 forwardMLP (MLP wfc bfc wproj bproj) x = x3
-  where x1 = (traceShow (fmap (takesV [5]) x)) fmap ((+ bfc) . (wfc #>)) x
-        x2 = (traceShow (fmap (takesV [5]) x1)) fmap gelu x1
-        x3 = (traceShow (fmap (takesV [5]) x2)) fmap ((+ bproj) . (wproj #>)) x2
+  where
+    x1 = fmap ((+ bfc) . (wfc #>)) x
+    x2 = fmap gelu x1
+    x3 = fmap ((+ bproj) . (wproj #>)) x2
 
 forwardBlock :: BlockLayer -> [V] -> [V]
-forwardBlock (BlockLayer l1 at l2 mp) xs = x4
+forwardBlock (BlockLayer l1 at l2 mp) xs = x5
   where
     x1 = fmap (forwardLN l1) xs
     x2 = zipWith (+) xs (forwardAttn at x1)
     x3 = fmap (forwardLN l2) x2
-    x4 = forwardMLP mp x3
+    x4 = zipWith (+) x2 (forwardMLP mp x3)
+    x5 = (traceShow (fmap (takesV [5]) x4)) x4
 
 softmax :: V -> V
 softmax v = expv * scalar (1 / sumElements expv)
@@ -263,7 +268,7 @@ forward model token = o
     PositionEmbeddingLayer wpew = wpe model
     emb1 = (wtew !! token) + head wpew
     emb2 = (wtew !! token) + (head . tail) wpew
-    o = forwardBlock (block model) [emb1, emb2]
+    o = (foldr (.) id (forwardBlock <$> blocks model)) [emb1, emb2]
 
 run :: Maybe SafeTensors -> Maybe String
 run safeten = do
