@@ -11,7 +11,7 @@ run model = do
   gpt <- model
   let next = forwardModel gpt [15496, 11] -- [616]
   let x = snd $ maximumBy (comparing fst) (zip (toList (last next)) [0..])
-  return (show x)
+  return (show (x :: Int))
   -- return (show (fmap (takesV [5]) next))
 
 main :: IO ()

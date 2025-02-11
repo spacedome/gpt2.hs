@@ -156,7 +156,7 @@ constructModel :: TensorMap -> Maybe GPT
 constructModel tm = do
   pe <- getPELayer tm
   te <- getTELayer tm
-  block <- mapM (getBlock tm) [0 .. 11]
+  block <- mapM (getBlock tm) [11, 10 .. 0]
   ln <- getLayerNorm tm "ln_f"
   return (GPT pe te block ln)
 
