@@ -26,4 +26,8 @@ readVocab filePath = do
   return (parseStringIntJSON contents)
 
 token :: TokenMap -> [Token] -> String
-token tm t = T.unpack $ T.concat (mapMaybe (`Map.lookup` tm) t)
+token tm t = (T.unpack . removeSpecial . T.concat) (mapMaybe (`Map.lookup` tm) t)
+
+
+removeSpecial :: T.Text -> T.Text
+removeSpecial = T.replace (T.singleton '\x0120') (T.singleton ' ')
