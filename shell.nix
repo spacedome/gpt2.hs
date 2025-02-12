@@ -5,7 +5,7 @@ let
   inherit (nixpkgs) pkgs;
 
   f = { mkDerivation, aeson, aeson-pretty, base, binary, bytestring
-      , hmatrix, lib, unordered-containers, vector
+      , hmatrix, lib, unordered-containers, vector, random
       }:
       mkDerivation {
         pname = "gpt2";
@@ -15,7 +15,7 @@ let
         isExecutable = true;
         executableHaskellDepends = [
           aeson aeson-pretty base binary bytestring hmatrix
-          unordered-containers vector
+          unordered-containers vector random
         ];
         license = lib.licenses.bsd3;
         mainProgram = "gpt2";

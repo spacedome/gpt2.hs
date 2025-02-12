@@ -75,7 +75,8 @@ executable gpt2
                       unordered-containers ^>=0.2.20,
                       binary ^>=0.8.9,
                       aeson-pretty ^>=0.8.10,
-                      hmatrix ^>=0.20
+                      hmatrix ^>=0.20,
+                      random ^>=1.2.0
 
     -- Directories containing source files.
     hs-source-dirs:   app
