@@ -62,7 +62,8 @@ executable gpt2
 
     -- Modules included in this executable, other than Main.
     other-modules:    Model,
-                      Loader
+                      Loader,
+                      Token
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
@@ -76,7 +77,9 @@ executable gpt2
                       binary ^>=0.8.9,
                       aeson-pretty ^>=0.8.10,
                       hmatrix ^>=0.20,
-                      random ^>=1.2.0
+                      random ^>=1.2.0,
+                      containers ^>=0.6,
+                      text ^>=2.0
 
     -- Directories containing source files.
     hs-source-dirs:   app

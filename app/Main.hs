@@ -14,13 +14,15 @@ import System.Random (randomRIO)
 topK :: V -> V
 topK v = fromList (map f (toList v))
   where
-    k = sortBy (comparing Down) (toList v) !! 200
+    k = sortBy (comparing Down) (toList v) !! 100
     -- here 2 is the "tempurature"
     f x = if x > k then x / 2 else -1 / 0
 
--- simple max sampler for testing
+-- simple max probability sampler for testing. Deterministic output
 sampleMax :: V -> IO Token
 sampleMax x = return $ snd $ maximumBy (comparing fst) (zip (toList x) [0 ..])
+
+
 
 sampleLogits :: V -> IO Int
 sampleLogits v = do

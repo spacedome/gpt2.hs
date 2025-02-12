@@ -11,6 +11,8 @@ import Data.Maybe (mapMaybe)
 
 type TokenMap = Map.Map Token T.Text
 
+-- This sorta works but has weird unicode issues around whitespace
+-- Not something I want to figure out, so decode it with python tiktoken
 
 parseStringIntJSON :: BL.ByteString -> Maybe TokenMap
 parseStringIntJSON json = do

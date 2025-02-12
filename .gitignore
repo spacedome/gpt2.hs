@@ -1,2 +1,4 @@
 dist-newstyle
 model.safetensors
+vocab.json
+weights

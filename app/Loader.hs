@@ -77,6 +77,8 @@ parseWord64 bs
   | BL.length bs >= 8 = Just $ runGet getWord64le bs
   | otherwise = Nothing
 
+-- ideally we could just mmap this into a Vector
+-- this probably at least doubles memory consumption
 byteStringToFloats :: BL.ByteString -> [Float]
 byteStringToFloats = runGet getFloats
   where
@@ -90,14 +92,17 @@ byteStringToFloats = runGet getFloats
           xs <- getFloats
           return (x : xs)
 
+-- I tried cleaning up the error handling with Either in all of these
+-- and it 3x'ed the memory usage... not going to try to figure out why rn
 bytesToTensor :: BL.ByteString -> TensorMetadata -> Tensor
 bytesToTensor bs meta = case shape meta of
   [n] -> T1 (n |> dataChunk)
   [n, m] -> T2 ((n >< m) dataChunk)
   [1, 1, n, m] -> T2 ((n >< m) dataChunk)
-  _ -> undefined
+  _ -> error ("Unrecognized tensor " ++ show meta)
   where
     (startpos, endpos) = bimap fromIntegral fromIntegral (dataOffsets meta)
+    -- not sure if this rescans, but if it does this is probably very slow
     dataChunk = byteStringToFloats (BL.drop startpos (BL.take endpos bs))
 
 
@@ -160,6 +165,7 @@ constructModel tm = do
   ln <- getLayerNorm tm "ln_f"
   return (GPT pe te block ln)
 
+-- there is a bottleneck that causes slow loading, probably here
 getTensorMap :: SafeTensors -> TensorMap
 getTensorMap ten = fmap (bytesToTensor (binaryData ten)) (metadata ten)
 
