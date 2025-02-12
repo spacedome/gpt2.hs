@@ -6,6 +6,7 @@ import Data.List (maximumBy, sortBy)
 import Data.Ord (Down (Down), comparing)
 import Loader
 import Model
+import Token
 import Numeric.LinearAlgebra (fromList, toList)
 import Numeric.Natural
 import System.Random (randomRIO)
@@ -28,18 +29,21 @@ sampleLogits v = do
   where
     findIndex r cumProbs = length (takeWhile (<= r) cumProbs)
 
-run :: GPT -> Natural -> [Token] -> IO [Token]
-run model iter tokens = do
+run :: GPT -> TokenMap -> Natural -> [Token] -> IO [Token]
+run model tm iter tokens = do
   next <- sampleLogits $ last $ forwardModel model tokens
-  print next
+  putStrLn (token tm (tokens ++ [next]))
   if iter == 0
     then return (tokens ++ [next])
-    else run model (iter - 1) (tokens ++ [next])
+    else run model tm (iter - 1) (tokens ++ [next])
 
 main :: IO ()
 main = do
-  results <- readModel "model.safetensors"
-  let model = case results of Right gpt -> gpt; Left err -> error err
+  tensors <- readModel "model.safetensors"
+  vocab   <- readVocab "vocab.json"
+  let model = case tensors of Right gpt -> gpt; Left err -> error err
+  let tokenMap = case vocab of Just tm -> tm; Nothing -> error "Couldn't parse vocab"
   -- Tokens for "Hello, I am"
-  generate <- run model 25 [15496, 11, 314, 716]
+  generate <- run model tokenMap 25 [15496, 11, 314, 716]
+  print (token tokenMap generate)
   print generate
