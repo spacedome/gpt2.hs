@@ -4,7 +4,7 @@
 
 module Loader where
 
-import Data.Aeson
+import Data.Aeson (FromJSON, ToJSON, Value, decode, withObject, (.:))
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -13,7 +13,7 @@ import Data.Bifunctor (bimap)
 import Data.Binary.Get (Get, getFloatle, getWord64le, isEmpty, runGet)
 import qualified Data.ByteString.Lazy as BL
 import Data.Word (Word64)
-import GHC.Generics
+import GHC.Generics (Generic)
 import Model
 import Numeric.LinearAlgebra (tr, (><), (|>))
 import Numeric.LinearAlgebra.Data (toRows)

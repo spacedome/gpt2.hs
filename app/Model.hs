@@ -79,9 +79,9 @@ attnAtToken (Attention w b _ _) x = (qh, kh, vh)
   where
     y = (w #> x) + b
     -- split apart into Q, K, V components
-    qkv = takesV [768, 768, 768] y
-    -- probably a better way to do this lol
-    (q, k, v) = (head qkv, (head . tail) qkv, (head . tail . tail) qkv)
+    (q,k,v) = case takesV [768, 768, 768] y of
+      [x1,x2,x3] -> (x1,x2,x3)
+      _ -> error "QKV could not be split"
     -- split into individual heads
     qh = takesV (replicate 12 64) q
     kh = takesV (replicate 12 64) k
