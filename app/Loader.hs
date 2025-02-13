@@ -26,7 +26,7 @@ data Tensor = T1 V | T2 M
 -- generate a keymap based on the safetensor metadata
 type TensorMap = KM.KeyMap Tensor
 
--- metadata for an individual tensor
+-- metadata for an individual tensor (safetensor format)
 data TensorMetadata = TensorMetadata
   { dtype :: String,
     shape :: [Int],
@@ -105,6 +105,7 @@ bytesToTensor bs meta = case shape meta of
     -- not sure if this rescans, but if it does this is probably very slow
     dataChunk = byteStringToFloats (BL.drop startpos (BL.take endpos bs))
 
+-- getting layer weights is straight forward. some matrices need to be transposed.
 
 getMat :: TensorMap -> String -> Maybe M
 getMat tm s = case KM.lookup (K.fromString s) tm of
