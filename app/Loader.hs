@@ -4,13 +4,13 @@
 
 module Loader where
 
-import Data.Aeson (FromJSON, ToJSON, Value, decode, withObject, (.:))
+import Data.Aeson (FromJSON, ToJSON, Value, eitherDecode, withObject, (.:))
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
-import Data.Aeson.Types (Parser, parseMaybe)
+import Data.Aeson.Types (Parser, parseEither)
 import Data.Bifunctor (bimap)
-import Data.Binary.Get (getWord64le, runGet)
+import Data.Binary.Get (getWord64le, runGetOrFail)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BS
 import qualified Data.ByteString.Lazy as BL
@@ -20,7 +20,8 @@ import Foreign.ForeignPtr (castForeignPtr)
 import Foreign.Storable (Storable, sizeOf)
 import GHC.Generics (Generic)
 import Model
-import Numeric.LinearAlgebra (reshape, tr)
+import qualified Data.Vector.Generic as VG
+import Numeric.LinearAlgebra (reshape, tr )
 import Numeric.LinearAlgebra.Data (toRows)
 import Prelude hiding ((<>))
 
@@ -64,24 +65,24 @@ parseTensorMetadata = withObject "TensorMetadata" $ \obj -> do
         }
     )
 
-parseTensors :: BL.ByteString -> Maybe SafeTensors
+parseTensors :: BL.ByteString -> Either String SafeTensors
 parseTensors bs = do
   -- the first 8 bytes are an uint specifiying length of JSON segment
   numBytes <- parseWord64 (BL.take 8 bs)
   -- the next N bytes can be decoded directly with aeson
-  obj <- decode (BL.take (fromIntegral numBytes) (BL.drop 8 bs))
+  obj <- eitherDecode (BL.take (fromIntegral numBytes) (BL.drop 8 bs))
   -- this is the one key that isn't a tensor, easiest just to remove it
   let tensors = KM.delete (K.fromString "__metadata__") obj
   -- parse tensor metadata objects into our metadata type
-  x <- mapM (parseMaybe parseTensorMetadata) tensors
+  x <- mapM (parseEither parseTensorMetadata) tensors
   -- return metadata keymap along with remaining raw bytes containing tensor data
   return (SafeTensors x (BS.toStrict (BL.drop (8 + fromIntegral numBytes) bs)))
 
 -- parse a Word64 from the head of the file (encodes length of JSON segment)
-parseWord64 :: BL.ByteString -> Maybe Word64
-parseWord64 bs
-  | BL.length bs >= 8 = Just $ runGet getWord64le bs
-  | otherwise = Nothing
+parseWord64 :: BL.ByteString -> Either String Word64
+parseWord64 bs = case runGetOrFail getWord64le bs of
+  Right (_, _, w) -> Right w
+  Left (_, _, s) -> Left ("Error reading leading uint64: " ++ s)
 
 -- https://github.com/kmcallister/spool
 sizeOfElem :: (Storable a) => VS.Vector a -> Int
@@ -95,47 +96,48 @@ byteStringToVector bs = vec
     (fptr, off, len) = BS.toForeignPtr bs
     scale = (`div` sizeOfElem vec)
 
-bytesToTensor :: BS.ByteString -> TensorMetadata -> Tensor
+bytesToTensor :: BS.ByteString -> TensorMetadata -> Either String Tensor
 bytesToTensor bs meta = case shape meta of
-  [_] -> T1 dataChunk
-  [_, m] -> T2 (reshape m dataChunk)
-  [1, 1, _, m] -> T2 (reshape m dataChunk)
-  _ -> error ("Unrecognized tensor " ++ show meta)
+  [n] -> if VG.length vec == n then Right (T1 vec) else errmsg
+  [n, m] -> if VG.length vec == n * m then  Right (T2 (reshape m vec)) else errmsg
+  [1, 1, n, m] -> if VG.length vec == n * m then  Right (T2 (reshape m vec)) else errmsg
+  _ -> errmsg
   where
     (startpos, endpos) = bimap fromIntegral fromIntegral (dataOffsets meta)
+    errmsg = Left ("Wrong size while reading " ++ show meta)
     -- it would maybe be better to load them "in order" with splitAt but
     -- the loading is fast enough with this now that the BS is cast directly
-    dataChunk = byteStringToVector (BS.drop startpos (BS.take endpos bs))
+    vec = byteStringToVector (BS.drop startpos (BS.take endpos bs))
 
 -- getting layer weights is straight forward. some matrices need to be transposed.
 
-getMat :: TensorMap -> String -> Maybe M
+getMat :: TensorMap -> String -> Either String M
 getMat tm s = case KM.lookup (K.fromString s) tm of
-  (Just (T2 m)) -> Just m
-  _ -> Nothing
+  (Just (T2 m)) -> Right m
+  _ -> Left ("Error loading " ++ s)
 
-getVec :: TensorMap -> String -> Maybe V
+getVec :: TensorMap -> String -> Either String V
 getVec tm s = case KM.lookup (K.fromString s) tm of
-  (Just (T1 v)) -> Just v
-  _ -> Nothing
+  (Just (T1 v)) -> Right v
+  _ -> Left ("Error loading " ++ s)
 
-getTELayer :: TensorMap -> Maybe TokenEmbedding
+getTELayer :: TensorMap -> Either String TokenEmbedding
 getTELayer tm = do
   m <- getMat tm "wte.weight"
   return (TokenEmbedding (toRows m))
 
-getPELayer :: TensorMap -> Maybe PositionEmbedding
+getPELayer :: TensorMap -> Either String PositionEmbedding
 getPELayer tm = do
   m <- getMat tm "wpe.weight"
   return (PositionEmbedding (toRows m))
 
-getLayerNorm :: TensorMap -> String -> Maybe LayerNorm
+getLayerNorm :: TensorMap -> String -> Either String LayerNorm
 getLayerNorm tm s = do
   w <- getVec tm (s ++ ".weight")
   b <- getVec tm (s ++ ".bias")
   return (LayerNorm w b)
 
-getAttention :: TensorMap -> String -> Maybe Attention
+getAttention :: TensorMap -> String -> Either String Attention
 getAttention tm layer = do
   aw <- getMat tm (layer ++ ".attn.c_attn.weight")
   ab <- getVec tm (layer ++ ".attn.c_attn.bias")
@@ -143,7 +145,7 @@ getAttention tm layer = do
   pb <- getVec tm (layer ++ ".attn.c_proj.bias")
   return (Attention (tr aw) ab (tr pw) pb)
 
-getMLP :: TensorMap -> String -> Maybe MLP
+getMLP :: TensorMap -> String -> Either String MLP
 getMLP tm layer = do
   aw <- getMat tm (layer ++ ".mlp.c_fc.weight")
   ab <- getVec tm (layer ++ ".mlp.c_fc.bias")
@@ -151,7 +153,7 @@ getMLP tm layer = do
   pb <- getVec tm (layer ++ ".mlp.c_proj.bias")
   return (MLP (tr aw) ab (tr pw) pb)
 
-getBlock :: TensorMap -> Int -> Maybe Block
+getBlock :: TensorMap -> Int -> Either String Block
 getBlock tm i = do
   let prefix = "h." ++ show i
   le1 <- getLayerNorm tm (prefix ++ ".ln_1")
@@ -160,7 +162,7 @@ getBlock tm i = do
   mp <- getMLP tm prefix
   return (Block le1 at le2 mp)
 
-constructModel :: TensorMap -> Maybe GPT
+constructModel :: TensorMap -> Either String GPT
 constructModel tm = do
   pe <- getPELayer tm
   te <- getTELayer tm
@@ -168,19 +170,14 @@ constructModel tm = do
   ln <- getLayerNorm tm "ln_f"
   return (GPT pe te block ln)
 
--- there is a bottleneck that causes slow loading, probably here
-getTensorMap :: SafeTensors -> TensorMap
-getTensorMap ten = fmap (bytesToTensor (binaryData ten)) (metadata ten)
+getTensorMap :: SafeTensors -> Either String TensorMap
+getTensorMap ten = mapM (bytesToTensor (binaryData ten)) (metadata ten)
 
 parseModel :: BL.ByteString -> Either String GPT
 parseModel bytes = do
-  safeTensors <- case parseTensors bytes of
-    Just tensors -> Right tensors
-    Nothing -> Left "Could not parse bytestring"
-  let tensorMap = getTensorMap safeTensors
-  case constructModel tensorMap of
-    Just model -> Right model
-    Nothing -> Left "Issue constructing layers"
+  safeTensors <- parseTensors bytes
+  tensorMap <- getTensorMap safeTensors
+  constructModel tensorMap
 
 readModel :: String -> IO (Either String GPT)
 readModel filePath = do
