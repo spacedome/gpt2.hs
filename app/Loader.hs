@@ -10,15 +10,21 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseMaybe)
 import Data.Bifunctor (bimap)
-import Data.Binary.Get (Get, getFloatle, getWord64le, isEmpty, runGet)
+import Data.Binary.Get (getWord64le, runGet)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BS
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.Vector.Storable as VS
 import Data.Word (Word64)
+import Foreign.ForeignPtr (castForeignPtr)
+import Foreign.Storable (Storable, sizeOf)
 import GHC.Generics (Generic)
 import Model
-import Numeric.LinearAlgebra (tr, (><), (|>))
+import Numeric.LinearAlgebra (reshape, tr)
 import Numeric.LinearAlgebra.Data (toRows)
 import Prelude hiding ((<>))
 
+    
 -- simple sum type so we can load either vec or mat
 -- I could probably use the generic Container from hmatrix but this is easy
 data Tensor = T1 V | T2 M
@@ -37,7 +43,7 @@ data TensorMetadata = TensorMetadata
 -- entire safetensors file including unmapped raw tensor data
 data SafeTensors = SafeTensors
   { metadata :: KM.KeyMap TensorMetadata,
-    binaryData :: BL.ByteString
+    binaryData :: BS.ByteString
   }
 
 -- we don't want to show the binary data, might as well have a pretty printer
@@ -69,7 +75,7 @@ parseTensors bs = do
   -- parse tensor metadata objects into our metadata type
   x <- mapM (parseMaybe parseTensorMetadata) tensors
   -- return metadata keymap along with remaining raw bytes containing tensor data
-  return (SafeTensors x (BL.drop (8 + fromIntegral numBytes) bs))
+  return (SafeTensors x (BS.toStrict (BL.drop (8 + fromIntegral numBytes) bs)))
 
 -- parse a Word64 from the head of the file (encodes length of JSON segment)
 parseWord64 :: BL.ByteString -> Maybe Word64
@@ -77,33 +83,29 @@ parseWord64 bs
   | BL.length bs >= 8 = Just $ runGet getWord64le bs
   | otherwise = Nothing
 
--- ideally we could just mmap this into a Vector
--- this probably at least doubles memory consumption
-byteStringToFloats :: BL.ByteString -> [Float]
-byteStringToFloats = runGet getFloats
-  where
-    getFloats :: Get [Float]
-    getFloats = do
-      empty <- isEmpty
-      if empty
-        then return []
-        else do
-          x <- getFloatle
-          xs <- getFloats
-          return (x : xs)
+-- https://github.com/kmcallister/spool
+sizeOfElem :: (Storable a) => VS.Vector a -> Int
+sizeOfElem vec = sizeOf (undefined `asTypeOf` VS.head vec)
 
--- I tried cleaning up the error handling with Either in all of these
--- and it 3x'ed the memory usage... not going to try to figure out why rn
-bytesToTensor :: BL.ByteString -> TensorMetadata -> Tensor
+-- https://stackoverflow.com/questions/18682527/how-to-convert-between-bytestring-and-storable-vector
+byteStringToVector :: (Storable a) => BS.ByteString -> VS.Vector a
+byteStringToVector bs = vec
+  where
+    vec = VS.unsafeFromForeignPtr (castForeignPtr fptr) (scale off) (scale len)
+    (fptr, off, len) = BS.toForeignPtr bs
+    scale = (`div` sizeOfElem vec)
+
+bytesToTensor :: BS.ByteString -> TensorMetadata -> Tensor
 bytesToTensor bs meta = case shape meta of
-  [n] -> T1 (n |> dataChunk)
-  [n, m] -> T2 ((n >< m) dataChunk)
-  [1, 1, n, m] -> T2 ((n >< m) dataChunk)
+  [_] -> T1 dataChunk
+  [_, m] -> T2 (reshape m dataChunk)
+  [1, 1, _, m] -> T2 (reshape m dataChunk)
   _ -> error ("Unrecognized tensor " ++ show meta)
   where
     (startpos, endpos) = bimap fromIntegral fromIntegral (dataOffsets meta)
-    -- not sure if this rescans, but if it does this is probably very slow
-    dataChunk = byteStringToFloats (BL.drop startpos (BL.take endpos bs))
+    -- it would maybe be better to load them "in order" with splitAt but
+    -- the loading is fast enough with this now that the BS is cast directly
+    dataChunk = byteStringToVector (BS.drop startpos (BS.take endpos bs))
 
 -- getting layer weights is straight forward. some matrices need to be transposed.
 

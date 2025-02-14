@@ -10,6 +10,7 @@ import Model
 import Numeric.LinearAlgebra (fromList, toList)
 import Numeric.Natural
 import System.Random (randomRIO)
+import System.IO (hSetBuffering, BufferMode(NoBuffering), stdout)
 import Token
 
 topK :: V -> V
@@ -37,19 +38,23 @@ run :: GPT -> TokenMap -> Natural -> [Token] -> IO [Token]
 run model tm iter tokens = do
   next <- sampleLogits $ last $ forwardModel model tokens
   -- unicode output isn't handled correctly, not sure if its the print or the read
-  TIO.putStrLn (token tm (tokens ++ [next]))
-  if iter == 0
+  TIO.putStr (token tm [next])
+  if iter == 0 || next == 50256
+    -- this is short enough that end of list append is fine 
     then return (tokens ++ [next])
     else run model tm (iter - 1) (tokens ++ [next])
 
 main :: IO ()
 main = do
+  hSetBuffering stdout NoBuffering
   putStrLn "λλμ: Now Loading..."
   tensors <- readModel "model.safetensors"
   vocab <- readVocab "vocab.json"
   let model = case tensors of Right gpt -> gpt; Left err -> error err
   let tokenMap = case vocab of Just tm -> tm; Nothing -> error "Couldn't parse vocab"
+  putStrLn "\n----BEGIN----\n"
+  putStr "Hello, I am"
   -- Tokens for "Hello, I am"
-  generate <- run model tokenMap 20 [15496, 11, 314, 716]
-  TIO.putStrLn (token tokenMap generate)
+  generate <- run model tokenMap 50 [15496, 11, 314, 716]
+  putStrLn "\n\n-----END-----\n"
   print generate

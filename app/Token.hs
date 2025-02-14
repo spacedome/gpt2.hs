@@ -27,8 +27,14 @@ readVocab filePath = do
   contents <- BL.readFile filePath
   return (parseStringIntJSON contents)
 
+-- theoretically a unicode char could be split across tokens?
 token :: TokenMap -> [Token] -> T.Text
 token tm t = (removeSpecial . T.concat) (mapMaybe (`Map.lookup` tm) t)
+
+tokenSingle :: TokenMap -> Token -> String
+tokenSingle tm t = case Map.lookup t tm of
+  Just txt -> T.unpack (removeSpecial txt)
+  Nothing -> " "
 
 -- for some reason this char is used as a leading space in many tokens
 removeSpecial :: T.Text -> T.Text
