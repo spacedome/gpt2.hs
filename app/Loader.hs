@@ -14,18 +14,17 @@ import Data.Binary.Get (getWord64le, runGetOrFail)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BS
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.Vector.Generic as VG
 import qualified Data.Vector.Storable as VS
 import Data.Word (Word64)
 import Foreign.ForeignPtr (castForeignPtr)
 import Foreign.Storable (Storable, sizeOf)
 import GHC.Generics (Generic)
 import Model
-import qualified Data.Vector.Generic as VG
-import Numeric.LinearAlgebra (reshape, tr )
+import Numeric.LinearAlgebra (reshape, tr)
 import Numeric.LinearAlgebra.Data (toRows)
 import Prelude hiding ((<>))
 
-    
 -- simple sum type so we can load either vec or mat
 -- I could probably use the generic Container from hmatrix but this is easy
 data Tensor = T1 V | T2 M
@@ -84,10 +83,6 @@ parseWord64 bs = case runGetOrFail getWord64le bs of
   Right (_, _, w) -> Right w
   Left (_, _, s) -> Left ("Error reading leading uint64: " ++ s)
 
--- https://github.com/kmcallister/spool
-sizeOfElem :: (Storable a) => VS.Vector a -> Int
-sizeOfElem vec = sizeOf (undefined `asTypeOf` VS.head vec)
-
 -- https://stackoverflow.com/questions/18682527/how-to-convert-between-bytestring-and-storable-vector
 byteStringToVector :: (Storable a) => BS.ByteString -> VS.Vector a
 byteStringToVector bs = vec
@@ -95,12 +90,13 @@ byteStringToVector bs = vec
     vec = VS.unsafeFromForeignPtr (castForeignPtr fptr) (scale off) (scale len)
     (fptr, off, len) = BS.toForeignPtr bs
     scale = (`div` sizeOfElem vec)
+    sizeOfElem vect = sizeOf (undefined `asTypeOf` VS.head vect)
 
 bytesToTensor :: BS.ByteString -> TensorMetadata -> Either String Tensor
 bytesToTensor bs meta = case shape meta of
   [n] -> if VG.length vec == n then Right (T1 vec) else errmsg
-  [n, m] -> if VG.length vec == n * m then  Right (T2 (reshape m vec)) else errmsg
-  [1, 1, n, m] -> if VG.length vec == n * m then  Right (T2 (reshape m vec)) else errmsg
+  [n, m] -> if VG.length vec == n * m then Right (T2 (reshape m vec)) else errmsg
+  [1, 1, n, m] -> if VG.length vec == n * m then Right (T2 (reshape m vec)) else errmsg
   _ -> errmsg
   where
     (startpos, endpos) = bimap fromIntegral fromIntegral (dataOffsets meta)
